@@ -1,11 +1,64 @@
 import { createServer } from 'http'
 import { Server } from 'socket.io'
-import { User, Room, SignalingMessage } from './types'
+import express from 'express'
+import mongoose from 'mongoose'
+import cors from 'cors'
+import authRoutes from './routes/auth.js'
+import { QueuedUser, Room, SignalingMessage } from './types.js'
 import { randomUUID } from 'crypto'
+import dotenv from 'dotenv'
 
+// Load environment variables
+dotenv.config()
 
-// server/src/server.ts
-const httpServer = createServer()
+// Create HTTP and Express server
+const app = express()
+const httpServer = createServer(app)
+
+// MongoDB setup with error handling
+const MONGO_URL = process.env.MONGO_URL
+if (!MONGO_URL) {
+  console.error('MONGO_URL not found in environment variables')
+  process.exit(1)
+}
+
+mongoose.connect(MONGO_URL, {
+  dbName: 'zcdatabase' // Explicitly set database name
+})
+  .then(() => {
+    console.log('Connected to MongoDB - Database: zcdatabase')
+  })
+  .catch(err => {
+    console.error('MongoDB connection error:', err)
+    process.exit(1)
+  })
+
+// Express middleware
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  credentials: true
+}))
+app.use(express.json())
+
+// Debug middleware
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`, req.body)
+  next()
+})
+
+// Auth routes
+app.use('/api', authRoutes)
+
+// Error handling middleware
+app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Error:', err)
+  res.status(500).json({
+    success: false,
+    error: err.message || 'Internal server error'
+  })
+})
+
+// Socket.io setup
 const io = new Server(httpServer, {
   cors: {
     origin: process.env.CLIENT_URL || 'http://localhost:5173',
@@ -15,31 +68,15 @@ const io = new Server(httpServer, {
   },
   pingTimeout: 60000,
   pingInterval: 25000,
-  transports: ['polling', 'websocket'],
-  allowUpgrades: true,
-  cookie: {
-    name: 'io',
-    path: '/',
-    httpOnly: true,
-    sameSite: 'none',
-    secure: true
-  }
+  transports: ['polling', 'websocket']
 })
 
-interface QueuedUser extends User {
-  deviceInfo: {
-    browser: string
-    os: string
-    network: string
-  }
-}
-
+// WebSocket state
 const users = new Map<string, QueuedUser>()
 const rooms = new Map<string, Room>()
-const queue: string[] = [] // Socket IDs of users waiting to be matched
+const queue: string[] = []
 
 function getBrowserInfo(userAgent: string) {
-  // Simple user agent parsing
   const browser = userAgent.includes('Firefox') ? 'Firefox' : 
                  userAgent.includes('Chrome') ? 'Chrome' : 
                  userAgent.includes('Safari') ? 'Safari' : 'Unknown'
@@ -51,32 +88,27 @@ function getBrowserInfo(userAgent: string) {
   return { browser, os }
 }
 
-// Enhanced matching function with preferences
-function findMatch(socketId: string, preferences?: any): string | null {
-  // Skip users that are already in a room or disconnected
+function findMatch(socketId: string): string | null {
   const eligibleUsers = queue.filter(id => {
     const user = users.get(id)
-    return id !== socketId && user && !user.roomId
+    return id !== socketId && user && !user.roomId && user.inQueue
   })
 
   if (eligibleUsers.length === 0) return null
 
-  // For now, just pick a random user. Could be enhanced with preferences later
   const randomIndex = Math.floor(Math.random() * eligibleUsers.length)
-  const matchedId = eligibleUsers[randomIndex]
-  
-  // Remove matched user from queue
-  const index = queue.indexOf(matchedId)
-  if (index !== -1) {
-    queue.splice(index, 1)
-  }
-  
-  return matchedId
+  return eligibleUsers[randomIndex]
 }
 
 function createRoom(user1Id: string, user2Id: string): Room {
   const roomId = randomUUID()
-  console.log(`Creating room ${roomId} for users:`, user1Id, user2Id)
+  const user1 = users.get(user1Id)
+  const user2 = users.get(user2Id)
+
+  console.log(`Creating room ${roomId} for users:`, {
+    user1: { id: user1Id, name: user1?.name },
+    user2: { id: user2Id, name: user2?.name }
+  })
   
   const room: Room = {
     id: roomId,
@@ -86,20 +118,13 @@ function createRoom(user1Id: string, user2Id: string): Room {
   
   rooms.set(roomId, room)
   
-  // Update users with room info
-  const user1 = users.get(user1Id)!
-  const user2 = users.get(user2Id)!
-  
-  user1.roomId = roomId
-  user2.roomId = roomId
-  user1.inQueue = false
-  user2.inQueue = false
+  if (user1 && user2) {
+    user1.roomId = roomId
+    user2.roomId = roomId
+    user1.inQueue = false
+    user2.inQueue = false
+  }
 
-  console.log(`Room ${roomId} created with users:`, {
-    user1: { id: user1.id, socketId: user1.socketId },
-    user2: { id: user2.id, socketId: user2.socketId }
-  })
-  
   return room
 }
 
@@ -107,17 +132,14 @@ function cleanupUser(socketId: string) {
   const user = users.get(socketId)
   if (!user) return
 
-  // Remove from queue
   const queueIndex = queue.indexOf(socketId)
   if (queueIndex !== -1) {
     queue.splice(queueIndex, 1)
   }
 
-  // Handle room cleanup
   if (user.roomId) {
     const room = rooms.get(user.roomId)
     if (room) {
-      // Notify other user in room
       const partnerId = room.users.find(id => id !== socketId)
       if (partnerId) {
         const partner = users.get(partnerId)
@@ -134,31 +156,10 @@ function cleanupUser(socketId: string) {
   users.delete(socketId)
 }
 
-// Add this function to log room state
-function logRoomState(roomId: string) {
-  const room = rooms.get(roomId)
-  if (!room) {
-    console.log(`Room ${roomId} not found`)
-    return
-  }
-
-  console.log(`Room ${roomId} state:`, {
-    users: room.users.map(userId => {
-      const user = users.get(userId)
-      return user ? {
-        id: user.id,
-        socketId: user.socketId,
-        inQueue: user.inQueue
-      } : 'User not found'
-    }),
-    createdAt: new Date(room.createdAt).toISOString()
-  })
-}
-
+// Socket connection handler
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id)
   
-  // Create new user with device info
   const user: QueuedUser = {
     id: randomUUID(),
     socketId: socket.id,
@@ -171,104 +172,51 @@ io.on('connection', (socket) => {
   }
   users.set(socket.id, user)
 
-  // Send initial state with queue info
   socket.emit('connection-success', {
     userId: user.id,
-    activeUsers: users.size,
-    queueInfo: queue.map(id => ({
-      position: queue.indexOf(id) + 1,
-      deviceInfo: users.get(id)?.deviceInfo
-    }))
+    activeUsers: users.size
   })
 
-  socket.on('leave-room', () => {
-    console.log('User leaving room:', socket.id)
+  socket.on('join-queue', (userInfo?: { name?: string }) => {
     const user = users.get(socket.id)
-    if (!user?.roomId) return
+    if (!user || user.inQueue || user.roomId) return
 
-    const room = rooms.get(user.roomId)
-    if (!room) return
-
-    // Notify other user in room
-    const partnerId = room.users.find(id => id !== socket.id)
-    if (partnerId) {
-      const partner = users.get(partnerId)
-      if (partner) {
-        partner.roomId = undefined
-        partner.inQueue = false
-        io.to(partnerId).emit('peer-disconnected')
-      }
-    }
-
-    // Clean up room
-    rooms.delete(room.id)
-    user.roomId = undefined
-    user.inQueue = false
-
-    console.log('Room cleaned up:', room.id)
-  })
-
-  socket.on('join-queue', (preferences?: any) => {
-    const user = users.get(socket.id)
-    if (!user || user.inQueue || user.roomId) {
-      console.log('Invalid join-queue request:', {
-        userId: user?.id,
-        inQueue: user?.inQueue,
-        hasRoom: !!user?.roomId
-      })
-      return
-    }
-
-    console.log('User joining queue:', socket.id)
+    user.name = userInfo?.name || 'Anonymous'
     user.inQueue = true
     queue.push(socket.id)
     
-    const position = queue.indexOf(socket.id) + 1
-    
-    // Notify user they're in queue
-    socket.emit('queue-joined', {
-      position,
-      queueLength: queue.length
-    })
-    
-    // Notify all users about queue update
-    io.emit('queue-updated', {
-      queueLength: queue.length,
-      queueInfo: queue
-        .map((id, index) => {
-          const user = users.get(id)
-          return user ? {
-            position: index + 1,
-            deviceInfo: user.deviceInfo || {
-              browser: 'Unknown',
-              os: 'Unknown',
-              network: 'Unknown'
-            }
-          } : null
-        })
-        .filter(Boolean)
-    })
-    
-    // Try to find a match
-    const matchedId = findMatch(socket.id, preferences)
+    const matchedId = findMatch(socket.id)
     if (matchedId) {
+      const matchedUser = users.get(matchedId)
+      if (!matchedUser) return
+
+      queue.splice(queue.indexOf(socket.id), 1)
+      queue.splice(queue.indexOf(matchedId), 1)
+
       const room = createRoom(socket.id, matchedId)
-      logRoomState(room.id)
-      
-      // Notify both users they've been matched
+
       io.to(socket.id).emit('matched', {
         roomId: room.id,
         initiator: true,
-        peerInfo: users.get(matchedId)?.deviceInfo
+        peerInfo: {
+          name: matchedUser.name,
+          deviceInfo: matchedUser.deviceInfo
+        }
       })
-      
+
       io.to(matchedId).emit('matched', {
         roomId: room.id,
         initiator: false,
-        peerInfo: users.get(socket.id)?.deviceInfo
+        peerInfo: {
+          name: user.name,
+          deviceInfo: user.deviceInfo
+        }
       })
-
-      console.log(`Users matched in room ${room.id}:`, socket.id, matchedId)
+    } else {
+      socket.emit('queue-joined', {
+        position: queue.length,
+        total: queue.length
+      })
     }
   })
 
@@ -281,68 +229,43 @@ io.on('connection', (socket) => {
       queue.splice(index, 1)
       user.inQueue = false
       socket.emit('queue-left')
-      console.log('User left queue:', socket.id)
     }
   })
 
   socket.on('signal', (message: SignalingMessage) => {
-    console.log(`Signaling: ${message.type} from ${socket.id}`)
-    
-    const user = users.get(socket.id)
-    if (!user?.roomId) {
-      console.error('User not in room:', socket.id)
-      return
-    }
-
-    const room = rooms.get(user.roomId)
-    if (!room) {
-      console.error('Room not found:', user.roomId)
-      return
-    }
-
-    // Find the recipient
-    const recipientId = room.users.find(id => id !== socket.id)
-    if (!recipientId) {
-      console.error('Recipient not found in room:', room.id)
-      return
-    }
-
-    // Forward the signaling message with room info
-    console.log(`Forwarding ${message.type} from ${socket.id} to ${recipientId} in room ${room.id}`)
-    io.to(recipientId).emit('signal', {
-      type: message.type,
-      payload: message.payload,
-      from: socket.id,
-      roomId: room.id,
-      timestamp: Date.now()
-    })
-  })
-
-  socket.on('chat-message', (message: { text: string; timestamp: number }) => {
     const user = users.get(socket.id)
     if (!user?.roomId) return
 
     const room = rooms.get(user.roomId)
     if (!room) return
 
-    // Find the other user in the room
     const recipientId = room.users.find(id => id !== socket.id)
     if (!recipientId) return
 
-    // Forward the message to the other user
-    io.to(recipientId).emit('chat-message', {
-      id: randomUUID(),
-      text: message.text,
-      senderId: user.id,
-      timestamp: message.timestamp
+    io.to(recipientId).emit('signal', {
+      type: message.type,
+      payload: message.payload,
+      from: socket.id,
+      roomId: room.id
     })
+  })
+
+  socket.on('chat-message', (message: any) => {
+    const user = users.get(socket.id)
+    if (!user?.roomId) return
+
+    const room = rooms.get(user.roomId)
+    if (!room) return
+
+    const recipientId = room.users.find(id => id !== socket.id)
+    if (!recipientId) return
+
+    io.to(recipientId).emit('chat-message', message)
   })
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id)
     cleanupUser(socket.id)
-    
-    // Broadcast updated user count
     io.emit('users-updated', {
       activeUsers: users.size,
       inQueue: queue.length
@@ -350,11 +273,10 @@ io.on('connection', (socket) => {
   })
 })
 
-// Periodic cleanup of stale rooms and users
+// Periodic cleanup and queue updates
 setInterval(() => {
   const now = Date.now()
   
-  // Clean up rooms that are too old (e.g., 1 hour)
   rooms.forEach((room, roomId) => {
     if (now - room.createdAt > 60 * 60 * 1000) {
       room.users.forEach(userId => {
@@ -368,7 +290,6 @@ setInterval(() => {
     }
   })
   
-  // Update queue positions
   if (queue.length > 0) {
     queue.forEach((socketId, index) => {
       io.to(socketId).emit('queue-position', {
@@ -377,13 +298,9 @@ setInterval(() => {
       })
     })
   }
-}, 10000) // Every 10 seconds
+}, 10000)
 
 const PORT = process.env.PORT || 3000
-httpServer.on('request', (req, res) => {
-  res.end("working server")
-  console.log("working server")
-})
 httpServer.listen(PORT, () => {
-  console.log(`Signaling server running on port ${PORT}`)
+  console.log(`Server running on port ${PORT}`)
 }) 
