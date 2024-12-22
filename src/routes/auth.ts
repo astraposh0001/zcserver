@@ -1,10 +1,15 @@
-import express from 'express'
+import express, { Response } from 'express'
 import jwt from 'jsonwebtoken'
-import { User } from '../models/User.js'
+import { User, IUser } from '../models/User.js'
 import { auth, AuthRequest } from '../middleware/auth.js'
 
 const router = express.Router()
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
+
+// Update the request type to include user
+interface AuthenticatedRequest extends AuthRequest {
+  user: IUser
+}
 
 // Register new user
 router.post('/register', async (req, res) => {
@@ -126,9 +131,9 @@ router.post('/login', async (req, res) => {
 })
 
 // Get user status
-router.get('/user-status', auth, async (req: AuthRequest, res) => {
+router.get('/user-status', auth, (req: AuthRequest, res: Response) => {
   try {
-    const user = req.user
+    const user = req.user as IUser
     res.json({
       success: true,
       user: {

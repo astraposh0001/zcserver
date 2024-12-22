@@ -1,5 +1,22 @@
-import mongoose from 'mongoose'
+import mongoose, { Document, Model } from 'mongoose'
 import bcrypt from 'bcrypt'
+
+// Interface for User methods
+interface IUserMethods {
+  comparePassword(candidatePassword: string): Promise<boolean>
+}
+
+// Interface for User document
+export interface IUser extends Document {
+  username: string
+  email: string
+  password: string
+  createdAt: Date
+  comparePassword(candidatePassword: string): Promise<boolean>
+}
+
+// Interface for User model
+interface UserModel extends Model<IUser, {}, IUserMethods> {}
 
 const userSchema = new mongoose.Schema({
   username: {
@@ -28,7 +45,7 @@ const userSchema = new mongoose.Schema({
     default: Date.now
   }
 }, {
-  collection: 'users' // Explicitly set collection name
+  collection: 'users'
 })
 
 // Hash password before saving
@@ -54,4 +71,4 @@ userSchema.methods.comparePassword = async function(candidatePassword: string): 
   }
 }
 
-export const User = mongoose.model('User', userSchema) 
+export const User = mongoose.model<IUser, UserModel>('User', userSchema) 

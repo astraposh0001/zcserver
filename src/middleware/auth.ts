@@ -1,11 +1,11 @@
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import { User } from '../models/User.js'
+import { User, IUser } from '../models/User.js'
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
 
 export interface AuthRequest extends Request {
-  user?: any
+  user?: IUser
 }
 
 export const auth = async (req: AuthRequest, res: Response, next: NextFunction) => {
