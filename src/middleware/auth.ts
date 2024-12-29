@@ -1,31 +1,34 @@
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
-import { User, IUser } from '../models/User.js'
+import { User } from '../models/User.js'
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
-
-export interface AuthRequest extends Request {
-  user?: IUser
+// Extend Express Request type to include user
+declare global {
+  namespace Express {
+    interface Request {
+      user?: any
+    }
+  }
 }
 
-export const auth = async (req: AuthRequest, res: Response, next: NextFunction) => {
+export const auth = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const token = req.header('Authorization')?.replace('Bearer ', '')
-    
+
     if (!token) {
-      throw new Error()
+      throw new Error('No token provided')
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as { _id: string }
-    const user = await User.findOne({ _id: decoded._id })
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!)
+    const user = await User.findById((decoded as any).userId)
 
     if (!user) {
-      throw new Error()
+      throw new Error('User not found')
     }
 
     req.user = user
     next()
-  } catch (err) {
+  } catch (error) {
     res.status(401).json({ error: 'Please authenticate' })
   }
 } 

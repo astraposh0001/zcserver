@@ -1,153 +1,183 @@
-import express, { Response } from 'express'
+import express from 'express'
+import bcrypt from 'bcrypt'
 import jwt from 'jsonwebtoken'
-import { User, IUser } from '../models/User.js'
-import { auth, AuthRequest } from '../middleware/auth.js'
+import { User } from '../models/User.js'
+import { auth } from '../middleware/auth.js'
 
 const router = express.Router()
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key'
 
-// Update the request type to include user
-interface AuthenticatedRequest extends AuthRequest {
-  user: IUser
-}
+// Middleware to ensure JSON responses
+router.use((req, res, next) => {
+  res.setHeader('Content-Type', 'application/json')
+  next()
+})
 
-// Register new user
 router.post('/register', async (req, res) => {
   try {
-    console.log('Register request:', req.body)
-    const { username, email, password } = req.body
+    const { email, password, username, firstName, lastName } = req.body
 
-    // Validate input
-    if (!username || !email || !password) {
+    // Log the received data
+    console.log('Registration attempt with:', { email, username, firstName, lastName })
+
+    // Validate required fields
+    if (!email || !password || !username || !firstName || !lastName) {
       return res.status(400).json({
-        success: false,
         error: 'All fields are required'
       })
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid email format'
-      })
-    }
-
-    // Validate password length
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        error: 'Password must be at least 6 characters'
-      })
-    }
-
     // Check if user already exists
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }]
+    const existingUser = await User.findOne({ 
+      $or: [{ email }, { username }] 
     })
 
     if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        error: existingUser.email === email ? 'Email already exists' : 'Username already exists'
+      console.log('User already exists:', existingUser.email)
+      return res.status(400).json({ 
+        error: 'User with this email or username already exists' 
       })
     }
 
+    // Hash password
+    const salt = await bcrypt.genSalt(10)
+    const hashedPassword = await bcrypt.hash(password, salt)
+
     // Create new user
-    const user = new User({ username, email, password })
-    await user.save()
+    const user = new User({
+      email,
+      username,
+      firstName,
+      lastName,
+      password: hashedPassword
+    })
 
-    // Generate token
-    const token = jwt.sign({ _id: user._id }, JWT_SECRET)
+    // Save user and log the result
+    const savedUser = await user.save()
+    console.log('User created successfully:', savedUser._id)
 
-    console.log('User registered successfully:', {
+    // Create JWT token
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET!,
+      { expiresIn: '7d' }
+    )
+
+    // Return user data (excluding password) and token
+    const userData = {
       id: user._id,
+      email: user.email,
       username: user.username,
-      email: user.email
-    })
+      firstName: user.firstName,
+      lastName: user.lastName,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt
+    }
 
-    res.status(201).json({
-      success: true,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        createdAt: user.createdAt
-      },
-      token
-    })
-  } catch (err) {
-    console.error('Registration error:', err)
-    res.status(400).json({
-      success: false,
-      error: err instanceof Error ? err.message : 'Failed to create account'
+    res.status(201).json({ user: userData, token })
+  } catch (error) {
+    console.error('Registration error:', error)
+    res.status(500).json({ 
+      error: 'Registration failed',
+      details: error instanceof Error ? error.message : 'Unknown error'
     })
   }
 })
 
-// Login user
+// Add login route
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body
+    const { emailOrUsername, password } = req.body
+    console.log('Login attempt:', { emailOrUsername })
+
+    // Validate input
+    if (!emailOrUsername || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email/username and password are required'
+      })
+    }
 
     // Find user
-    const user = await User.findOne({ email })
+    const user = await User.findOne({
+      $or: [
+        { email: emailOrUsername.toLowerCase() },
+        { username: emailOrUsername }
+      ]
+    })
+
     if (!user) {
       return res.status(401).json({
         success: false,
-        error: 'Invalid email or password'
+        error: 'Invalid credentials'
       })
     }
 
-    // Check password
-    const isMatch = await user.comparePassword(password)
-    if (!isMatch) {
+    // Verify password
+    const isValid = await bcrypt.compare(password, user.password)
+    if (!isValid) {
       return res.status(401).json({
         success: false,
-        error: 'Invalid email or password'
+        error: 'Invalid credentials'
       })
     }
 
     // Generate token
-    const token = jwt.sign({ _id: user._id }, JWT_SECRET)
+    const token = jwt.sign(
+      { userId: user._id },
+      process.env.JWT_SECRET || 'fallback-secret',
+      { expiresIn: '7d' }
+    )
 
-    res.json({
+    // Send response
+    return res.status(200).json({
       success: true,
       user: {
-        _id: user._id,
-        username: user.username,
+        id: user._id,
         email: user.email,
-        createdAt: user.createdAt
+        username: user.username,
+        firstName: user.firstName,
+        lastName: user.lastName
       },
       token
     })
-  } catch (err) {
-    res.status(400).json({
+
+  } catch (error) {
+    console.error('Login error:', error)
+    return res.status(500).json({
       success: false,
-      error: 'Login failed'
+      error: 'Internal server error'
     })
   }
 })
 
-// Get user status
-router.get('/user-status', auth, (req: AuthRequest, res: Response) => {
+// Update profile endpoint
+router.put('/profile', auth, async (req, res) => {
   try {
-    const user = req.user as IUser
-    res.json({
-      success: true,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        createdAt: user.createdAt
+    const { firstName, lastName, username } = req.body
+
+    // Check if username is taken (if changed)
+    if (username !== req.user.username) {
+      const existingUser = await User.findOne({ username })
+      if (existingUser) {
+        return res.status(400).json({ error: 'Username already taken' })
       }
-    })
-  } catch (err) {
-    res.status(400).json({
-      success: false,
-      error: 'Failed to get user status'
-    })
+    }
+
+    // Update user
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { firstName, lastName, username },
+      { new: true }
+    ).select('-password')
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    res.json({ user })
+  } catch (error) {
+    console.error('Error updating profile:', error)
+    res.status(500).json({ error: 'Failed to update profile' })
   }
 })
 
