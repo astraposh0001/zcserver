@@ -26,7 +26,7 @@ app.use((req, res, next) => {
 
 // Update CORS configuration
 const allowedOrigins = [
-  'https://zoye.in',
+  'https://zoye.vercel.app',
   'http://localhost:5173',
   'http://zoye.in'
 ]
